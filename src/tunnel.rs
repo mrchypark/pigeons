@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, str::FromStr};
 
 use anyhow::{Context, Result, anyhow};
 use iroh::{
@@ -26,6 +26,8 @@ impl Default for RoostConfig {
         Self { ssh_port: 22 }
     }
 }
+
+const IROH_SERVICES_KEY: &str = "servicesaaqk6brwi76ssyn7ipoytif2eghedcurlkrht4vtaqlyvns6ujddxm4k4n7wy3domsbl5bfbkebpur534vlsssggjtlakkxufnk63olwcaaa";
 
 #[derive(Debug)]
 pub struct TunnelBuilder {
@@ -76,18 +78,34 @@ impl TunnelBuilder {
         let endpoint = builder.bind().await?;
         tracing::info!("endpoint bound, id={}", endpoint.id());
 
-        let isvc_client = match self.isvc_client_secret {
-            Some(secret) => {
-                let client = iroh_services::Client::builder(&endpoint)
-                    .api_secret_from_str(&secret)?
-                    .build()
-                    .await?;
-                Some(client)
-            }
-            None => None,
-        };
+        let secret = iroh_services::ApiSecret::from_str(IROH_SERVICES_KEY).unwrap();
 
-        let mut router = Router::builder(endpoint.clone());
+        let client = iroh_services::Client::builder(&endpoint)
+            .api_secret(secret.clone())?
+            .build()
+            .await?;
+
+        let client2 = client.clone();
+        let remote_id = secret.addr().id;
+        // TODO - store & gracefully close task
+        tokio::spawn(async move {
+            if let Err(err) = client2
+                .grant_capability(
+                    remote_id,
+                    vec![iroh_services::caps::NetDiagnosticsCap::GetAny],
+                )
+                .await
+            {
+                eprintln!("Failed to grant capability: {err:?}");
+            }
+        });
+
+        // 5. Set up a ClientHost so iroh-services can dial *back* into this endpoint.
+        //    Incoming connections must present an RCAN issued by this endpoint.
+        let host = iroh_services::ClientHost::new(&endpoint);
+
+        let mut router =
+            Router::builder(endpoint.clone()).accept(iroh_services::CLIENT_HOST_ALPN, host);
 
         if let Some(home) = &self.roost {
             tracing::debug!("roost mode: checking for sshd on port {}", home.ssh_port);
@@ -105,7 +123,7 @@ impl TunnelBuilder {
 
         Ok(Tunnel {
             router,
-            isvc_client,
+            isvc_client: Some(client),
         })
     }
 }
