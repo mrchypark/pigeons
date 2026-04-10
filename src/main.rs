@@ -227,7 +227,11 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Version => {
-            println!("pigeons v{}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "pigeons v{} ({})",
+                env!("CARGO_PKG_VERSION"),
+                env!("GIT_HASH")
+            );
             Ok(())
         }
         Cmd::Service { op } => {
