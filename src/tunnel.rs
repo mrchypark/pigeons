@@ -48,7 +48,7 @@ impl Default for TunnelBuilder {
     fn default() -> Self {
         TunnelBuilder {
             roost: None,
-            secret_key: SecretKey::generate(&mut rand::rng()),
+            secret_key: SecretKey::generate(),
             relay_urls: Vec::new(),
             isvc_client_secret: None,
         }

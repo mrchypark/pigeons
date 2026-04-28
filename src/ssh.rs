@@ -32,7 +32,7 @@ pub fn dot_ssh_secret_key(ssh_dir: PathBuf) -> anyhow::Result<SecretKey> {
         Ok(SecretKey::from_bytes(&sk_bytes))
     } else {
         tracing::info!("generating new keys in {}", ssh_dir.display());
-        let secret_key = SecretKey::generate(&mut rand::rng());
+        let secret_key = SecretKey::generate();
         let public_key = secret_key.public();
 
         std::fs::write(&pub_key, z32::encode(public_key.as_bytes()))?;
