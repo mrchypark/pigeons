@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use iroh::{
     Endpoint, EndpointId, RelayUrl, SecretKey,
     endpoint::{RelayMode, presets},
-    protocol::Router,
+    protocol::{DynProtocolHandler, Router},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -29,7 +29,6 @@ impl Default for RoostConfig {
 
 const IROH_SERVICES_KEY: &str = "servicesaaqk6brwi76ssyn7ipoytif2eghedcurlkrht4vtaqlyvns6ujddxm4k4n7wy3domsbl5bfbkebpur534vlsssggjtlakkxufnk63olwcaaa";
 
-#[derive(Debug)]
 pub struct TunnelBuilder {
     /// optional roost role configuration to expose a local ssh server
     /// through the tunnel
@@ -42,6 +41,24 @@ pub struct TunnelBuilder {
     pub relay_urls: Vec<RelayUrl>,
     /// iroh services client for telemetry aggregation
     pub isvc_client_secret: Option<String>,
+    /// Extra `(ALPN, handler)` pairs to register on the router alongside the
+    /// pigeons protocol. Used by callers to attach the iroh-ota receiver
+    /// without leaking iroh-ota's types into this module.
+    pub extra_protocols: Vec<(Vec<u8>, Box<dyn DynProtocolHandler>)>,
+}
+
+impl std::fmt::Debug for TunnelBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TunnelBuilder")
+            .field("roost", &self.roost)
+            .field("relay_urls", &self.relay_urls)
+            .field(
+                "isvc_client_secret",
+                &self.isvc_client_secret.as_ref().map(|_| "..."),
+            )
+            .field("extra_protocols", &self.extra_protocols.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for TunnelBuilder {
@@ -51,6 +68,7 @@ impl Default for TunnelBuilder {
             secret_key: SecretKey::generate(),
             relay_urls: Vec::new(),
             isvc_client_secret: None,
+            extra_protocols: Vec::new(),
         }
     }
 }
@@ -62,6 +80,7 @@ impl TunnelBuilder {
             secret_key,
             relay_urls: vec![],
             isvc_client_secret: None,
+            extra_protocols: Vec::new(),
         }
     }
 
@@ -116,6 +135,14 @@ impl TunnelBuilder {
                 "roost accepting connections on ALPN {:?}",
                 std::str::from_utf8(PigeonsProtocol::ALPN)
             );
+        }
+
+        for (alpn, handler) in self.extra_protocols {
+            tracing::info!(
+                "registering extra protocol on ALPN {:?}",
+                std::str::from_utf8(&alpn)
+            );
+            router = router.accept(alpn, handler);
         }
 
         let router = router.spawn();

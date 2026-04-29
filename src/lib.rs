@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+pub mod ota;
 mod protocol;
 mod service;
 mod ssh;

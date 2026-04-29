@@ -34,6 +34,10 @@ tempfile = "3.27.0"
 self-runas = "0.1"
 iroh-services = "1.0.0-rc.0"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+iroh-updater = { path = "../iroh-updater", features = ["applier-systemd"] }
+iroh-blobs = "0.101"
+
 [target.'cfg(windows)'.dependencies.windows-service]
 version = "0.8.1"
 [target.'cfg(windows)'.dependencies.windows-sys]
