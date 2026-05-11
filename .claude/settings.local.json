@@ -4,7 +4,11 @@
       "mcp__acp__Write",
       "mcp__acp__Edit",
       "mcp__acp__Bash",
-      "Bash(cargo check)"
+      "Bash(cargo check)",
+      "Bash(cargo check *)",
+      "Bash(rustup target *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

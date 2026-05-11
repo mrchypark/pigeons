@@ -1,10 +1,10 @@
-//! Over-the-air update receiver, gluing [`iroh_ota`] to pigeons.
+//! Over-the-air update receiver, gluing [`iroh_updater`] to pigeons.
 //!
 //! Linux-only. The receiver runs alongside a roost installed as a systemd
 //! service: it shares the roost's iroh endpoint (registering an extra ALPN on
 //! the same router), uses the [`SystemdApplier`] to flip the on-disk symlink
 //! and trigger `systemctl restart pigeons.service`, and relies on
-//! [`iroh_ota::watchdog`] to roll back if the new binary fails to come up.
+//! [`iroh_updater::watchdog`] to roll back if the new binary fails to come up.
 //!
 //! On-disk layout under [`OTA_BASE`]:
 //!
@@ -26,15 +26,17 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use iroh::{Endpoint, EndpointId, protocol::DynProtocolHandler};
+use iroh::EndpointId;
 use iroh_blobs::store::mem::MemStore;
-use iroh_ota::{
-    ALPN, FileStatePersistence, OtaPaths, OtaServerBuilder, OtaStateSnapshot, ShellSystemctl,
+use iroh_updater::{
+    ALPN, FileStatePersistence, UpdatePaths, OtaServerBuilder, OtaStateSnapshot, ShellSystemctl,
     SymlinkConfig, SystemdApplier, SystemdConfig, TestCommand, VerifyingKey,
     iroh_base::PublicKey,
     persistence::StatePersistence,
     watchdog::{self, WatchdogConfig},
 };
+
+use crate::tunnel::ExtraProtocolFactory;
 
 /// Filesystem root for the OTA layout.
 pub const OTA_BASE: &str = "/opt/pigeons";
@@ -86,26 +88,21 @@ pub fn embedded_verifying_key() -> Result<Option<VerifyingKey>> {
     Ok(Some(VerifyingKey::from_public(public)))
 }
 
-/// Build the OTA receiver and return it ready to attach to the roost's
-/// router. Returns `Ok(None)` when OTA isn't configured (no embedded key) so
-/// the caller can transparently skip wiring it up.
+/// Build a factory that constructs the OTA receiver against the bound
+/// endpoint. Returns `Ok(None)` when OTA isn't configured (no embedded
+/// verifying key), so the caller can transparently skip wiring it up.
+///
+/// All fail-fast checks (key parsing, allowlist parsing) happen synchronously
+/// before the closure is returned — the closure itself runs once the endpoint
+/// is bound, and only does work that genuinely needs the endpoint.
 ///
 /// Caller must already be running as root: the [`SystemdApplier`] writes into
 /// [`OTA_BASE`] and shells out to `systemctl restart`.
-pub async fn build_handler(
-    endpoint: Endpoint,
-) -> Result<Option<(Vec<u8>, Box<dyn DynProtocolHandler>)>> {
+pub fn build_handler() -> Result<Option<ExtraProtocolFactory>> {
     let Some(verifying_key) = embedded_verifying_key()? else {
         tracing::info!("OTA disabled: PIGEONS_OTA_PUBKEY was not set at build time");
         return Ok(None);
     };
-
-    let base = PathBuf::from(OTA_BASE);
-    let paths = OtaPaths::new(&base);
-    paths
-        .ensure_dirs()
-        .await
-        .with_context(|| format!("creating OTA layout at {}", base.display()))?;
 
     let allowed = load_allowlist(Path::new(ALLOWLIST_FILE))
         .with_context(|| format!("reading {ALLOWLIST_FILE}"))?;
@@ -117,36 +114,50 @@ pub async fn build_handler(
         tracing::info!("OTA enabled with {} allowed pusher(s)", allowed.len());
     }
 
-    let blob_store = MemStore::new();
-    let applier = SystemdApplier::new(
-        ShellSystemctl,
-        SystemdConfig {
-            symlink: SymlinkConfig::new(paths.clone(), OTA_BINARY_NAME),
-            unit_name: OTA_UNIT_NAME.into(),
-            watchdog: Some(WatchdogConfig {
-                paths: paths.clone(),
-                ready_file: PathBuf::from(READY_FILE),
-                state_file: paths.state_file(),
-                timeout_secs: WATCHDOG_TIMEOUT_SECS,
-            }),
-        },
-    );
+    let factory: ExtraProtocolFactory = Box::new(move |endpoint| {
+        Box::pin(async move {
+            let base = PathBuf::from(OTA_BASE);
+            let paths = UpdatePaths::new(&base);
+            paths
+                .ensure_dirs()
+                .await
+                .with_context(|| format!("creating OTA layout at {}", base.display()))?;
 
-    let handler = OtaServerBuilder::new(applier, FileStatePersistence::new(paths.state_file()))
-        .verifying_key(verifying_key)
-        .target_triple(env!("TARGET"))
-        .endpoint(endpoint)
-        .blob_store((*blob_store).clone())
-        .paths(paths)
-        .test_command(TestCommand::SelfTest {
-            args: vec!["--self-test".into()],
+            let blob_store = MemStore::new();
+            let applier = SystemdApplier::new(
+                ShellSystemctl,
+                SystemdConfig {
+                    symlink: SymlinkConfig::new(paths.clone(), OTA_BINARY_NAME),
+                    unit_name: OTA_UNIT_NAME.into(),
+                    watchdog: Some(WatchdogConfig {
+                        paths: paths.clone(),
+                        ready_file: PathBuf::from(READY_FILE),
+                        state_file: paths.state_file(),
+                        timeout_secs: WATCHDOG_TIMEOUT_SECS,
+                    }),
+                },
+            );
+
+            let handler =
+                OtaServerBuilder::new(applier, FileStatePersistence::new(paths.state_file()))
+                    .verifying_key(verifying_key)
+                    .target_triple(env!("TARGET"))
+                    .endpoint(endpoint)
+                    .blob_store((*blob_store).clone())
+                    .paths(paths)
+                    .test_command(TestCommand::SelfTest {
+                        args: vec!["--self-test".into()],
+                    })
+                    .allow_all(allowed)
+                    .access_limit()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("building OTA handler: {e}"))?;
+
+            Ok((ALPN.to_vec(), Box::new(handler) as Box<_>))
         })
-        .allow_all(allowed)
-        .access_limit()
-        .await
-        .map_err(|e| anyhow::anyhow!("building OTA handler: {e}"))?;
+    });
 
-    Ok(Some((ALPN.to_vec(), Box::new(handler))))
+    Ok(Some(factory))
 }
 
 /// Touch the watchdog ready-file. Roost's `main()` calls this once startup is
@@ -172,7 +183,7 @@ pub async fn write_ready_file() -> Result<()> {
 
 /// Read and return the persisted OTA state, if any.
 pub async fn read_state_snapshot() -> Result<Option<OtaStateSnapshot>> {
-    let path = OtaPaths::new(OTA_BASE).state_file();
+    let path = UpdatePaths::new(OTA_BASE).state_file();
     let persistence = FileStatePersistence::new(path);
     persistence
         .load()

@@ -34,6 +34,11 @@ pub enum Cmd {
     },
     /// Print the version number
     Version,
+    /// Verify this binary can start up cleanly. Used by the OTA receiver
+    /// (via `iroh-ota`'s `TestCommand::SelfTest`) against a staged binary
+    /// before flipping the symlink. Exits 0 on success.
+    #[command(hide = true)]
+    SelfTest,
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -102,8 +107,13 @@ pub struct RemoveArgs {
     pub name: String,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // Must happen before any tokio runtime exists: the watchdog builds its
+    // own current-thread runtime and `process::exit`s without returning, and
+    // doing that from inside an outer runtime would panic.
+    #[cfg(target_os = "linux")]
+    pigeons::ota::detect_and_run_watchdog();
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
@@ -111,6 +121,13 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(run(cli))
+}
+
+async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Roost(args) => {
             let ssh_dir = pigeons::home_ssh_dir()?;
@@ -128,6 +145,18 @@ async fn main() -> anyhow::Result<()> {
                         .map_err(|e| anyhow::anyhow!("invalid relay URL '{url}': {e}"))?,
                 );
             }
+
+            // Service mode (root): wire up the OTA receiver if the binary
+            // was built with PIGEONS_OTA_PUBKEY. Skipped for unprivileged
+            // and ephemeral runs because the SystemdApplier writes into
+            // /opt/pigeons and shells out to `systemctl restart`.
+            #[cfg(target_os = "linux")]
+            if self_runas::is_elevated() {
+                if let Some(factory) = pigeons::ota::build_handler()? {
+                    builder.extra_protocols.push(factory);
+                }
+            }
+
             let tunnel = builder.build().await?;
             let id = tunnel.endpoint().id();
 
@@ -145,6 +174,17 @@ async fn main() -> anyhow::Result<()> {
                         dir.join("endpoint_id"),
                         std::fs::Permissions::from_mode(0o644),
                     )?;
+                }
+            }
+
+            // Tell the OTA watchdog (if any) we came up healthy. Best-effort:
+            // a failure here means the next push will time out and roll back,
+            // which is the correct behavior — but it shouldn't take down a
+            // roost that's otherwise running fine.
+            #[cfg(target_os = "linux")]
+            if self_runas::is_elevated() {
+                if let Err(e) = pigeons::ota::write_ready_file().await {
+                    tracing::warn!("failed to write OTA ready file: {e:#}");
                 }
             }
 
@@ -236,6 +276,7 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Cmd::SelfTest => Ok(()),
         Cmd::Service { op } => {
             match op {
                 ServiceCmd::Install {

@@ -1,4 +1,4 @@
-use std::{path::PathBuf, str::FromStr};
+use std::{future::Future, path::PathBuf, pin::Pin, str::FromStr};
 
 use anyhow::{Context, Result, anyhow};
 use iroh::{
@@ -15,6 +15,20 @@ use crate::{
     protocol::PigeonsProtocol,
     ssh::{self, dot_ssh_secret_key},
 };
+
+/// Factory that, given the bound endpoint, asynchronously constructs an
+/// `(ALPN, handler)` pair to attach to the same router. Callers (e.g. the
+/// `ota` module) use this to register extra protocols whose construction
+/// depends on the endpoint without exposing those types through this module.
+pub type ExtraProtocolFactory = Box<
+    dyn FnOnce(
+            Endpoint,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<(Vec<u8>, Box<dyn DynProtocolHandler>)>> + Send,
+            >,
+        > + Send,
+>;
 
 #[derive(Debug)]
 pub struct RoostConfig {
@@ -41,10 +55,11 @@ pub struct TunnelBuilder {
     pub relay_urls: Vec<RelayUrl>,
     /// iroh services client for telemetry aggregation
     pub isvc_client_secret: Option<String>,
-    /// Extra `(ALPN, handler)` pairs to register on the router alongside the
-    /// pigeons protocol. Used by callers to attach the iroh-ota receiver
-    /// without leaking iroh-ota's types into this module.
-    pub extra_protocols: Vec<(Vec<u8>, Box<dyn DynProtocolHandler>)>,
+    /// Factories that, given the bound endpoint, build extra protocol handlers
+    /// to register on the same router as the pigeons protocol. Lets callers
+    /// (e.g. the `ota` module) attach handlers whose construction depends on
+    /// the endpoint without leaking those types into this module.
+    pub extra_protocols: Vec<ExtraProtocolFactory>,
 }
 
 impl std::fmt::Debug for TunnelBuilder {
@@ -137,7 +152,8 @@ impl TunnelBuilder {
             );
         }
 
-        for (alpn, handler) in self.extra_protocols {
+        for factory in self.extra_protocols {
+            let (alpn, handler) = factory(endpoint.clone()).await?;
             tracing::info!(
                 "registering extra protocol on ALPN {:?}",
                 std::str::from_utf8(&alpn)
