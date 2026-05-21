@@ -75,7 +75,11 @@ pub trait Service {
 }
 
 pub async fn install(service_params: ServiceParams) -> anyhow::Result<()> {
-    info!(os = std::env::consts::OS, ssh_port = service_params.ssh_port, "installing service");
+    info!(
+        os = std::env::consts::OS,
+        ssh_port = service_params.ssh_port,
+        "installing service"
+    );
     match std::env::consts::OS {
         #[cfg(target_os = "linux")]
         "linux" => LinuxService::install(service_params).await,

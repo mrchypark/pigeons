@@ -19,11 +19,11 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub struct RoostConfig {
+pub struct SshConfig {
     pub ssh_port: u16,
 }
 
-impl Default for RoostConfig {
+impl Default for SshConfig {
     fn default() -> Self {
         Self { ssh_port: 22 }
     }
@@ -31,9 +31,9 @@ impl Default for RoostConfig {
 
 #[derive(Debug)]
 pub struct TunnelBuilder {
-    /// optional roost role configuration to expose a local ssh server
+    /// optional ssh server role configuration to expose a local ssh server
     /// through the tunnel
-    pub roost: Option<RoostConfig>,
+    pub ssh: Option<SshConfig>,
     /// ED25519 key to use to secure tunnel communications, the endpoint ID that
     /// identifies the tunnel is the public half of this keypair
     pub secret_key: SecretKey,
@@ -48,7 +48,7 @@ impl TunnelBuilder {
     fn new(secret_key: SecretKey) -> Result<Self> {
         let isvc_api_secret = iroh_services_api_secret()?;
         Ok(TunnelBuilder {
-            roost: None,
+            ssh: None,
             secret_key,
             relay_urls: vec![],
             isvc_api_secret,
@@ -61,11 +61,14 @@ impl TunnelBuilder {
     }
 
     pub async fn build(self) -> Result<Tunnel> {
-        debug!(roost = self.roost.is_some(), "building tunnel");
+        debug!(roost = self.ssh.is_some(), "building tunnel");
         let mut builder = Endpoint::builder(presets::N0).secret_key(self.secret_key.clone());
 
         if !self.relay_urls.is_empty() {
-            debug!(relay_url_count = self.relay_urls.len(), "using custom relay URLs");
+            debug!(
+                relay_url_count = self.relay_urls.len(),
+                "using custom relay URLs"
+            );
             let relay_map = self.relay_urls.iter().cloned().collect();
             builder = builder.relay_mode(RelayMode::Custom(relay_map));
         }
@@ -86,7 +89,7 @@ impl TunnelBuilder {
 
         let mut router = Router::builder(endpoint.clone());
 
-        if let Some(home) = &self.roost {
+        if let Some(home) = &self.ssh {
             debug!(port = home.ssh_port, "roost mode: checking for sshd");
             ssh::ensure_local_ssh_server_exists(home.ssh_port).await?;
             let handler = PigeonsProtocol::new(home.ssh_port);

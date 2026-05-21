@@ -19,6 +19,8 @@ use std::{
 #[cfg(target_os = "windows")]
 use tokio::task;
 #[cfg(target_os = "windows")]
+use tracing::{error, info, warn};
+#[cfg(target_os = "windows")]
 use windows_service::{
     Error as WinServiceError,
     service::{
@@ -28,9 +30,6 @@ use windows_service::{
     },
     service_manager::{ServiceManager, ServiceManagerAccess},
 };
-#[cfg(target_os = "windows")]
-use tracing::{error, info, warn};
-
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
     Foundation::{

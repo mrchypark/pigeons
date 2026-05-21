@@ -1,11 +1,11 @@
 use std::{fmt, path::PathBuf};
 
 use anyhow::{Context, bail};
-use tracing::{debug, info};
 use ed25519_dalek::SECRET_KEY_LENGTH;
 use homedir::my_home;
 use iroh::{PublicKey, SecretKey};
 use tokio::net::TcpStream;
+use tracing::{debug, info};
 
 pub fn home_ssh_dir() -> anyhow::Result<PathBuf> {
     let distro_home = my_home()?.ok_or_else(|| anyhow::anyhow!("home directory not found"))?;
