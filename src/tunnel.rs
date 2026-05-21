@@ -11,7 +11,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
-use tracing::warn;
+use tracing::{debug, error, info, warn};
 
 use crate::{
     protocol::PigeonsProtocol,
@@ -61,17 +61,17 @@ impl TunnelBuilder {
     }
 
     pub async fn build(self) -> Result<Tunnel> {
-        tracing::debug!("building tunnel, roost={}", self.roost.is_some());
+        debug!(roost = self.roost.is_some(), "building tunnel");
         let mut builder = Endpoint::builder(presets::N0).secret_key(self.secret_key.clone());
 
         if !self.relay_urls.is_empty() {
-            tracing::debug!("using {} custom relay URLs", self.relay_urls.len());
+            debug!(relay_url_count = self.relay_urls.len(), "using custom relay URLs");
             let relay_map = self.relay_urls.iter().cloned().collect();
             builder = builder.relay_mode(RelayMode::Custom(relay_map));
         }
 
         let endpoint = builder.bind().await?;
-        tracing::info!("endpoint bound, id={}", endpoint.id());
+        info!(id = %endpoint.id(), "endpoint bound");
 
         let isvc_client = match self.isvc_api_secret {
             Some(secret) => {
@@ -87,18 +87,15 @@ impl TunnelBuilder {
         let mut router = Router::builder(endpoint.clone());
 
         if let Some(home) = &self.roost {
-            tracing::debug!("roost mode: checking for sshd on port {}", home.ssh_port);
+            debug!(port = home.ssh_port, "roost mode: checking for sshd");
             ssh::ensure_local_ssh_server_exists(home.ssh_port).await?;
             let handler = PigeonsProtocol::new(home.ssh_port);
             router = router.accept(PigeonsProtocol::ALPN, handler);
-            tracing::info!(
-                "roost accepting connections on ALPN {:?}",
-                std::str::from_utf8(PigeonsProtocol::ALPN)
-            );
+            info!(alpn = ?std::str::from_utf8(PigeonsProtocol::ALPN), "roost accepting connections");
         }
 
         let router = router.spawn();
-        tracing::debug!("router spawned");
+        debug!("router spawned");
 
         Ok(Tunnel {
             router,
@@ -128,7 +125,7 @@ impl Tunnel {
     pub async fn fly(&self, remote: EndpointId) -> Result<()> {
         let bind_addr = format!("127.0.0.1:{}", 0);
         let listener = TcpListener::bind(&bind_addr).await?;
-        tracing::info!("fly: listening on {}", listener.local_addr()?);
+        info!(addr = %listener.local_addr()?, "fly: listening");
         prepare_pigeon(self.endpoint().clone(), listener, remote).await
     }
 
@@ -136,14 +133,14 @@ impl Tunnel {
     /// Designed for use as an SSH ProxyCommand:
     ///   ProxyCommand pigeons fly --stdio <endpoint_id>
     pub async fn fly_stdio(&self, remote: EndpointId) -> Result<()> {
-        tracing::debug!("fly_stdio: connecting to {remote}");
+        debug!(remote = %remote, "fly_stdio: connecting");
         let conn = self
             .endpoint()
             .connect(remote, PigeonsProtocol::ALPN)
             .await?;
-        tracing::debug!("fly_stdio: connected, opening bidirectional stream");
+        debug!("fly_stdio: connected, opening bidirectional stream");
         let (mut iroh_send, mut iroh_recv) = conn.open_bi().await?;
-        tracing::debug!("fly_stdio: bridging stdin/stdout");
+        debug!("fly_stdio: bridging stdin/stdout");
 
         let mut stdin = tokio::io::stdin();
         let mut stdout = tokio::io::stdout();
@@ -176,16 +173,16 @@ async fn prepare_pigeon(
     loop {
         match listener.accept().await {
             Ok((tcp_stream, peer_addr)) => {
-                tracing::info!("pigeon departing from {peer_addr}");
+                info!(peer_addr = %peer_addr, "pigeon departing");
                 let endpoint = endpoint.clone();
                 tokio::spawn(async move {
                     if let Err(e) = bridge_connection(tcp_stream, &endpoint, remote).await {
-                        tracing::error!("pigeon lost in transit: {e}");
+                        error!(err = %e, "pigeon lost in transit");
                     }
                 });
             }
             Err(err) => {
-                tracing::error!("failed to accept connection: {err}");
+                error!(err = %err, "failed to accept connection");
                 return Err(anyhow!(err));
             }
         }
@@ -199,9 +196,9 @@ async fn bridge_connection(
     remote_id: EndpointId,
 ) -> anyhow::Result<()> {
     tcp_stream.set_nodelay(true)?;
-    tracing::debug!("bridge_connection: connecting to {remote_id}");
+    debug!(remote_id = %remote_id, "bridge_connection: connecting");
     let conn = endpoint.connect(remote_id, PigeonsProtocol::ALPN).await?;
-    tracing::debug!("bridge_connection: connected, opening bi stream");
+    debug!("bridge_connection: connected, opening bi stream");
     let (mut iroh_send, mut iroh_recv) = conn.open_bi().await?;
     let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
 
