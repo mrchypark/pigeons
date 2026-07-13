@@ -114,6 +114,10 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    if matches!(cli.cmd, Cmd::Roost(_) | Cmd::Fly(_)) {
+        Config::maybe_prompt_telemetry().await?;
+    }
+
     match cli.cmd {
         Cmd::Roost(args) => {
             let ssh_dir = pigeons::home_ssh_dir()?;
