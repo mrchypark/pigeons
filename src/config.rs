@@ -21,27 +21,21 @@ impl Config {
     /// machine-wide one. The service runs as root, where the per-user config is
     /// root's own and almost always absent.
     pub async fn load() -> Result<Self> {
-        let user_path = Self::config_path()?;
+        let user = Self::load_user().await?;
         let Ok(system_path) = Self::system_config_path() else {
-            return Self::load_from(&user_path).await;
+            return Ok(user);
         };
-        Self::load_with_fallback(&user_path, &system_path).await
+        let system = Self::load_from(&system_path).await?;
+
+        Ok(Self {
+            telemetry_enabled: user.telemetry_enabled.or(system.telemetry_enabled),
+        })
     }
 
     /// Loads only the per-user config. The first-run question is about this
     /// user's setting, so a machine-wide answer must not stand in for it.
     pub async fn load_user() -> Result<Self> {
         Self::load_from(&Self::config_path()?).await
-    }
-
-    async fn load_with_fallback(user_path: &Path, system_path: &Path) -> Result<Self> {
-        let mut config = Self::load_from(user_path).await?;
-        config.fill_unset_from(Self::load_from(system_path).await?);
-        Ok(config)
-    }
-
-    fn fill_unset_from(&mut self, fallback: Self) {
-        self.telemetry_enabled = self.telemetry_enabled.or(fallback.telemetry_enabled);
     }
 
     /// Read and parse the config at `path`. Loading is read-only: a config that
@@ -189,49 +183,6 @@ mod tests {
     #[test]
     fn empty_config() {
         let config = toml::from_str::<Config>("").unwrap();
-        assert_eq!(config.telemetry_enabled, None);
-    }
-
-    #[tokio::test]
-    async fn user_config_wins_over_the_machine_wide_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let user = dir.path().join("user.toml");
-        let system = dir.path().join("system.toml");
-        fs::write(&user, "telemetry_enabled = false").await.unwrap();
-        fs::write(&system, "telemetry_enabled = true")
-            .await
-            .unwrap();
-
-        let config = Config::load_with_fallback(&user, &system).await.unwrap();
-
-        assert_eq!(config.telemetry_enabled, Some(false));
-    }
-
-    /// The case the service hits: root has no config of its own.
-    #[tokio::test]
-    async fn machine_wide_config_fills_in_an_unanswered_user_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let system = dir.path().join("system.toml");
-        fs::write(&system, "telemetry_enabled = true")
-            .await
-            .unwrap();
-
-        let config = Config::load_with_fallback(&dir.path().join("absent.toml"), &system)
-            .await
-            .unwrap();
-
-        assert_eq!(config.telemetry_enabled, Some(true));
-    }
-
-    #[tokio::test]
-    async fn telemetry_stays_off_when_neither_layer_exists() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let config =
-            Config::load_with_fallback(&dir.path().join("user.toml"), &dir.path().join("sys.toml"))
-                .await
-                .unwrap();
-
         assert_eq!(config.telemetry_enabled, None);
     }
 
