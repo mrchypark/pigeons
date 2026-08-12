@@ -19,8 +19,7 @@ use tokio::{
 
 const RELAY_URL_HELP: &str = "use this relay server, replacing the defaults (repeatable)";
 
-/// What we tell people before asking them about telemetry, kept to what the
-/// iroh-services client actually reports: counters from the iroh endpoint.
+/// Kept to what the iroh-services client actually reports: endpoint counters.
 const TELEMETRY_PITCH: &str = "\
 pigeons can send anonymous metrics to help us develop iroh, the peer-to-peer
 network it flies over. They are connection counters: relay usage,
@@ -137,13 +136,10 @@ pub struct RemoveArgs {
 }
 
 /// Whether this invocation is one we can interrupt with the telemetry question.
-///
-/// The question is only worth asking of a person sitting at a terminal who is
-/// setting pigeons up, and it is actively harmful to ask it anywhere else.
+/// Only a person setting pigeons up at a terminal should ever see it.
 fn should_ask_about_telemetry(cmd: &Cmd) -> bool {
     let setup_command = match cmd {
-        // `fly --stdio` is ssh's ProxyCommand: stdin and stdout carry the
-        // tunnel, so a prompt on either would corrupt the session.
+        // `fly --stdio` is ssh's ProxyCommand: a prompt would corrupt the tunnel.
         Cmd::Fly(args) => !args.stdio,
         Cmd::Roost(_) | Cmd::Add(_) => true,
         Cmd::Service {
@@ -152,19 +148,16 @@ fn should_ask_about_telemetry(cmd: &Cmd) -> bool {
         _ => false,
     };
 
-    // Elevated runs would write the answer into root's config rather than the
-    // config of the person answering. `service install` re-runs itself elevated,
-    // and by then the unelevated half has already asked.
+    // An elevated run would write the answer into root's config, and the
+    // unelevated half of `service install` has already asked by then.
     setup_command
         && !self_runas::is_elevated()
         && io::stdin().is_terminal()
         && io::stderr().is_terminal()
 }
 
-/// Reads a yes or no answer from `input`, re-asking until it gets one.
-///
-/// An empty line takes `default`. Returns `None` at end of input: a closed
-/// stdin never answered the question, which is not the same as answering no.
+/// Reads a yes or no answer from `input`, re-asking until it gets one. An empty
+/// line takes `default`; end of input returns `None`, which is not a no.
 async fn read_yes_no<R: AsyncBufRead + Unpin>(
     input: &mut R,
     default: bool,
@@ -184,13 +177,9 @@ async fn read_yes_no<R: AsyncBufRead + Unpin>(
     }
 }
 
-/// Asks about telemetry the first time someone sets pigeons up, and records
-/// the answer so we never ask again.
-///
-/// Both answers are written to the config file, which is what makes this a
-/// one-time question: an unset key means unasked, not declined. Every failure
-/// here is swallowed, because failing to record a preference must not stop the
-/// command the user actually ran.
+/// Asks about telemetry the first time someone sets pigeons up. Both answers
+/// are recorded, which is what makes it a one-time question. Failures are
+/// swallowed: a preference we cannot record must not stop the command itself.
 async fn ask_about_telemetry_once(cmd: &Cmd) {
     if !should_ask_about_telemetry(cmd) {
         return;
@@ -199,9 +188,7 @@ async fn ask_about_telemetry_once(cmd: &Cmd) {
         return;
     };
     // Deliberately not `load_or_default`: a config we could not parse is one we
-    // must not overwrite with an answer about its own contents. The user layer
-    // is read on its own so a machine-wide answer cannot silently stand in for
-    // this user's.
+    // must not overwrite.
     let Ok(mut config) = Config::load_user().await else {
         return;
     };
@@ -210,12 +197,10 @@ async fn ask_about_telemetry_once(cmd: &Cmd) {
     }
 
     eprintln!("\n{TELEMETRY_PITCH}\n");
-    // Opting in takes a deliberate "y": someone who hits enter to get past the
-    // question has not agreed to anything.
     eprint!("Send anonymous metrics? [y/N] ");
     let enabled = match read_yes_no(&mut BufReader::new(async_io::stdin()), false).await {
         Ok(Some(enabled)) => enabled,
-        // Leave the config alone so the next interactive run asks again.
+        // No answer: leave the config alone so the next run asks again.
         Ok(None) => {
             eprintln!();
             return;
@@ -239,13 +224,9 @@ async fn ask_about_telemetry_once(cmd: &Cmd) {
     }
 }
 
-/// Carries the installing user's telemetry choice over to the service and says
-/// what the service will do.
-///
-/// The service reads root's config rather than the config of whoever installed
-/// it, so the choice has to be copied into the machine-wide file. A failure
-/// here leaves the service opted out, which is worth a line of output but not
-/// worth failing an otherwise successful install over.
+/// Carries the installing user's telemetry choice over to the service, which
+/// reads root's config rather than theirs. A failure here leaves the service
+/// opted out, which is not worth failing a successful install over.
 async fn report_service_telemetry() {
     let enabled = match publish_telemetry_choice_for_service().await {
         Ok(enabled) => enabled,
@@ -532,8 +513,6 @@ mod tests {
         assert_eq!(answer("maybe\nsure\nn\n", true).await, Some(false));
     }
 
-    /// A closed stdin never answered, so the caller has to leave the config
-    /// untouched and ask again next time rather than record a silent no.
     #[tokio::test]
     async fn read_yes_no_returns_none_at_end_of_input() {
         assert_eq!(answer("", true).await, None);
@@ -550,8 +529,7 @@ mod tests {
         assert!(!should_ask_about_telemetry(&stdio));
     }
 
-    /// Reporting commands are not a setup step, so they stay quiet even on a
-    /// terminal.
+    /// Reporting commands are not a setup step.
     #[test]
     fn telemetry_question_skips_read_only_commands() {
         assert!(!should_ask_about_telemetry(&Cmd::List));

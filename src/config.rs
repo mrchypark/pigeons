@@ -21,28 +21,19 @@ impl Config {
         self.telemetry_enabled.unwrap_or(false)
     }
 
-    /// Whether the user has made a telemetry choice yet.
-    ///
-    /// An unset key means we have never asked, which is what the first-run
-    /// prompt keys off. It is distinct from an explicit `telemetry_enabled =
-    /// false`: both keep telemetry off, but only the former should produce a
-    /// question.
+    /// Whether a telemetry choice has been recorded. An unset key means we
+    /// have never asked, which is not the same as an explicit `false`.
     pub fn telemetry_configured(&self) -> bool {
         self.telemetry_enabled.is_some()
     }
 
-    /// Records a telemetry choice. Call [`Config::store`] to persist it.
     pub fn set_telemetry_enabled(&mut self, enabled: bool) {
         self.telemetry_enabled = Some(enabled);
     }
 
-    /// Loads the config every pigeons run should use: the per-user config,
-    /// with any key it leaves unset taken from the machine-wide config.
-    ///
-    /// The layering exists for the service. A roost installed with `pigeons
-    /// service install` runs as root, whose per-user config is its own and
-    /// almost always absent, so the machine-wide file written at install time
-    /// is what carries the answer over.
+    /// Loads the per-user config, taking any key it leaves unset from the
+    /// machine-wide one. The service runs as root, where the per-user config is
+    /// root's own and almost always absent.
     pub async fn load() -> Result<Self> {
         let user_path = Self::config_path()?;
         let Ok(system_path) = Self::system_config_path() else {
@@ -51,11 +42,8 @@ impl Config {
         Self::load_with_fallback(&user_path, &system_path).await
     }
 
-    /// Loads only the per-user config, ignoring the machine-wide fallback.
-    ///
-    /// The first-run question is about this user's setting, so it has to see
-    /// an unanswered user config as unanswered even on a machine that already
-    /// has a system-wide answer.
+    /// Loads only the per-user config. The first-run question is about this
+    /// user's setting, so a machine-wide answer must not stand in for it.
     pub async fn load_user() -> Result<Self> {
         Self::load_from(&Self::config_path()?).await
     }
@@ -66,7 +54,6 @@ impl Config {
         Ok(config)
     }
 
-    /// Takes every key this config leaves unset from `fallback`.
     fn fill_unset_from(&mut self, fallback: Self) {
         self.telemetry_enabled = self.telemetry_enabled.or(fallback.telemetry_enabled);
     }
@@ -115,11 +102,8 @@ impl Config {
         Ok(())
     }
 
-    /// Writes the config to `path` and makes it readable by everyone.
-    ///
-    /// This is how the machine-wide config is written: every unprivileged run
-    /// reads it as a fallback, and the umask of the root shell doing the
-    /// installing would otherwise decide whether they can.
+    /// Writes the config to `path`, readable by everyone: unprivileged runs
+    /// read the machine-wide config, and root's umask does not get a vote.
     async fn store_world_readable(&self, path: &Path) -> Result<()> {
         self.store_to(path).await?;
 
@@ -143,7 +127,7 @@ impl Config {
     }
 
     /// Path of the machine-wide config, alongside the endpoint ID the roost
-    /// publishes for `pigeons service status`.
+    /// publishes there.
     pub fn system_config_path() -> Result<PathBuf> {
         let dir = match env::consts::OS {
             "linux" | "macos" => Path::new("/etc/pigeons"),
@@ -153,13 +137,9 @@ impl Config {
         Ok(dir.join("config.toml"))
     }
 
-    /// Path of the per-user config belonging to the owner of `home`.
-    ///
-    /// [`Config::config_path`] cannot answer this: it reports the location for
-    /// whoever is running, and an elevated install needs the location of the
-    /// user who started it. The layouts here mirror what `dirs` reports for a
-    /// default environment, which is the only thing we can know about another
-    /// account.
+    /// Path of the per-user config under `home`, for reading the config of a
+    /// user other than the one running. Assumes the default layout `dirs`
+    /// reports, which is all we can know about another account.
     fn config_path_in(home: &Path) -> PathBuf {
         let relative = match env::consts::OS {
             "macos" => "Library/Application Support/pigeons/config.toml",
@@ -171,16 +151,12 @@ impl Config {
 }
 
 /// Copies the installing user's telemetry choice into the machine-wide config
-/// and reports what the service will do with it.
-///
-/// Call this from an elevated `pigeons service install`. The service runs as
-/// root and reads root's config, so without this step it can never see the
-/// answer the user gave in their own terminal.
+/// and reports what the service will do with it. Call this from an elevated
+/// `pigeons service install`; the service reads root's config, not theirs.
 ///
 /// # Errors
 ///
-/// Returns an error when the machine-wide config cannot be written, which for
-/// an unprivileged caller it cannot.
+/// Returns an error when the machine-wide config cannot be written.
 pub async fn publish_telemetry_choice_for_service() -> Result<bool> {
     let system_path = Config::system_config_path()?;
     let choice = installing_user_telemetry_choice().await;
@@ -194,21 +170,17 @@ async fn publish_telemetry_choice_to(system_path: &Path, choice: Option<bool>) -
         system.store_world_readable(system_path).await?;
     }
 
-    // Report what is on disk rather than what we just wrote: with nothing to
-    // propagate, an answer an admin put there earlier still governs the service.
+    // With nothing to propagate, an answer already on the machine still stands.
     Ok(Config::load_from(system_path)
         .await
         .unwrap_or_default()
         .telemetry_enabled())
 }
 
-/// The telemetry choice of the user who started an elevated command, if they
-/// have recorded one.
+/// The telemetry choice of the user who started an elevated command.
 ///
-/// `sudo` leaves the original account in `SUDO_USER`, which is the only pointer
-/// an elevated unix process has back to the config of the person who answered
-/// the question. Windows elevation keeps the same account, so there the running
-/// user's own config is already the right one to read.
+/// `SUDO_USER` is the only pointer an elevated unix process has back to them.
+/// Windows elevation keeps the same account, so its own config is the right one.
 async fn installing_user_telemetry_choice() -> Option<bool> {
     let path = match env::var("SUDO_USER") {
         Ok(user) => config_path_for_user(&user)?,
@@ -218,7 +190,6 @@ async fn installing_user_telemetry_choice() -> Option<bool> {
     Config::load_from(&path).await.ok()?.telemetry_enabled
 }
 
-/// Path of `user`'s config, or `None` when their home cannot be resolved.
 fn config_path_for_user(user: &str) -> Option<PathBuf> {
     let home = homedir::home(user).ok()??;
     Some(Config::config_path_in(&home))
@@ -234,8 +205,6 @@ mod tests {
         assert!(!config.telemetry_enabled());
     }
 
-    /// The first-run prompt asks exactly when no choice has been recorded, so
-    /// "off" and "never asked" have to stay distinguishable.
     #[test]
     fn declining_telemetry_still_counts_as_configured() {
         let unasked = toml::from_str::<Config>("").unwrap();
@@ -246,8 +215,6 @@ mod tests {
         assert!(!declined.telemetry_enabled());
     }
 
-    /// A user who answered the question owns the answer, even on a machine
-    /// whose service was installed with the opposite one.
     #[tokio::test]
     async fn user_config_wins_over_the_machine_wide_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -263,8 +230,7 @@ mod tests {
         assert!(!config.telemetry_enabled());
     }
 
-    /// This is the case the service hits: root has no config of its own, and
-    /// the answer lives in the machine-wide file written at install time.
+    /// The case the service hits: root has no config of its own.
     #[tokio::test]
     async fn machine_wide_config_fills_in_an_unanswered_user_config() {
         let dir = tempfile::tempdir().unwrap();
@@ -293,8 +259,6 @@ mod tests {
         assert!(!config.telemetry_enabled());
     }
 
-    /// What `service install` does once elevated: the answer the user gave in
-    /// their own terminal becomes the setting the root-owned service reads.
     #[tokio::test]
     async fn publishing_a_choice_writes_the_machine_wide_config() {
         for enabled in [true, false] {
@@ -316,9 +280,7 @@ mod tests {
         }
     }
 
-    /// Installing from a root shell leaves no `SUDO_USER` to trace back to, so
-    /// there is nothing to propagate and an answer already on the machine has
-    /// to survive the install.
+    /// Installing from a root shell leaves no `SUDO_USER` to trace back to.
     #[tokio::test]
     async fn publishing_nothing_keeps_the_existing_machine_wide_answer() {
         let dir = tempfile::tempdir().unwrap();
@@ -343,8 +305,6 @@ mod tests {
         assert!(!system.exists(), "nothing to record, nothing to write");
     }
 
-    /// Root writes this file, everyone reads it, and root's umask does not get
-    /// a vote.
     #[cfg(unix)]
     #[tokio::test]
     async fn machine_wide_config_is_world_readable() {
@@ -367,8 +327,6 @@ mod tests {
         assert_eq!(dir_mode & 0o777, 0o755);
     }
 
-    /// The elevated half of `service install` finds the invoking user's config
-    /// by way of their home directory, which has to resolve for a real account.
     #[test]
     fn config_path_for_user_lands_in_that_users_home() {
         let me = whoami::username().expect("running as some user");
