@@ -192,7 +192,7 @@ async fn ask_about_telemetry_once(cmd: &Cmd) {
     let Ok(mut config) = Config::load_user().await else {
         return;
     };
-    if config.telemetry_configured() {
+    if config.telemetry_enabled.is_some() {
         return;
     }
 
@@ -211,7 +211,7 @@ async fn ask_about_telemetry_once(cmd: &Cmd) {
         }
     };
 
-    config.set_telemetry_enabled(enabled);
+    config.telemetry_enabled = Some(enabled);
     if let Err(err) = config.store().await {
         eprintln!("could not save your answer: {err:#}\n");
         return;

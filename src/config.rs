@@ -12,25 +12,11 @@ use tokio::{
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
-    telemetry_enabled: Option<bool>,
+    /// Whether to send metrics to iroh-services. `None` means we have not asked.
+    pub telemetry_enabled: Option<bool>,
 }
 
 impl Config {
-    /// Whether sending metrics to the embedded or configured iroh-services endpoint is enabled.
-    pub fn telemetry_enabled(&self) -> bool {
-        self.telemetry_enabled.unwrap_or(false)
-    }
-
-    /// Whether a telemetry choice has been recorded. An unset key means we
-    /// have never asked, which is not the same as an explicit `false`.
-    pub fn telemetry_configured(&self) -> bool {
-        self.telemetry_enabled.is_some()
-    }
-
-    pub fn set_telemetry_enabled(&mut self, enabled: bool) {
-        self.telemetry_enabled = Some(enabled);
-    }
-
     /// Loads the per-user config, taking any key it leaves unset from the
     /// machine-wide one. The service runs as root, where the per-user config is
     /// root's own and almost always absent.
@@ -166,7 +152,7 @@ pub async fn publish_telemetry_choice_for_service() -> Result<bool> {
 async fn publish_telemetry_choice_to(system_path: &Path, choice: Option<bool>) -> Result<bool> {
     if let Some(enabled) = choice {
         let mut system = Config::load_from(system_path).await.unwrap_or_default();
-        system.set_telemetry_enabled(enabled);
+        system.telemetry_enabled = Some(enabled);
         system.store_world_readable(system_path).await?;
     }
 
@@ -174,7 +160,8 @@ async fn publish_telemetry_choice_to(system_path: &Path, choice: Option<bool>) -
     Ok(Config::load_from(system_path)
         .await
         .unwrap_or_default()
-        .telemetry_enabled())
+        .telemetry_enabled
+        .unwrap_or(false))
 }
 
 /// The telemetry choice of the user who started an elevated command.
@@ -202,17 +189,7 @@ mod tests {
     #[test]
     fn empty_config() {
         let config = toml::from_str::<Config>("").unwrap();
-        assert!(!config.telemetry_enabled());
-    }
-
-    #[test]
-    fn declining_telemetry_still_counts_as_configured() {
-        let unasked = toml::from_str::<Config>("").unwrap();
-        assert!(!unasked.telemetry_configured());
-
-        let declined = toml::from_str::<Config>("telemetry_enabled = false").unwrap();
-        assert!(declined.telemetry_configured());
-        assert!(!declined.telemetry_enabled());
+        assert_eq!(config.telemetry_enabled, None);
     }
 
     #[tokio::test]
@@ -227,7 +204,7 @@ mod tests {
 
         let config = Config::load_with_fallback(&user, &system).await.unwrap();
 
-        assert!(!config.telemetry_enabled());
+        assert_eq!(config.telemetry_enabled, Some(false));
     }
 
     /// The case the service hits: root has no config of its own.
@@ -243,7 +220,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(config.telemetry_enabled());
+        assert_eq!(config.telemetry_enabled, Some(true));
     }
 
     #[tokio::test]
@@ -255,8 +232,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert!(!config.telemetry_configured());
-        assert!(!config.telemetry_enabled());
+        assert_eq!(config.telemetry_enabled, None);
     }
 
     #[tokio::test]
@@ -270,13 +246,8 @@ mod tests {
                 .unwrap();
 
             assert_eq!(effective, enabled);
-            assert_eq!(
-                Config::load_from(&system)
-                    .await
-                    .unwrap()
-                    .telemetry_enabled(),
-                enabled
-            );
+            let stored = Config::load_from(&system).await.unwrap();
+            assert_eq!(stored.telemetry_enabled, Some(enabled));
         }
     }
 
@@ -356,13 +327,13 @@ mod tests {
         let path = dir.path().join("nested").join("config.toml");
 
         for enabled in [true, false] {
-            let mut config = Config::default();
-            config.set_telemetry_enabled(enabled);
+            let config = Config {
+                telemetry_enabled: Some(enabled),
+            };
             config.store_to(&path).await.unwrap();
 
             let loaded = Config::load_from(&path).await.unwrap();
-            assert!(loaded.telemetry_configured());
-            assert_eq!(loaded.telemetry_enabled(), enabled);
+            assert_eq!(loaded.telemetry_enabled, Some(enabled));
         }
     }
 
@@ -375,7 +346,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!config.telemetry_enabled());
+        assert_eq!(config.telemetry_enabled, None);
     }
 
     /// Regression: `load` used to open the file with `create(true)` and no write
@@ -389,8 +360,9 @@ mod tests {
 
         let config = Config::load_from(&path).await.unwrap();
 
-        assert!(
-            config.telemetry_enabled(),
+        assert_eq!(
+            config.telemetry_enabled,
+            Some(true),
             "settings on disk must take precedence over the defaults"
         );
     }
