@@ -1,15 +1,31 @@
-use std::{io, path::Path, str::FromStr};
+use std::{
+    io::{self, IsTerminal},
+    path::Path,
+    str::FromStr,
+};
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 use iroh::{EndpointId, RelayUrl};
 use iroh_pigeons::{
     Config, RoostConfig, ServiceParams, Tunnel, add_tunnel_host, home_ssh_dir, install_service,
-    list_tunnel_hosts, remove_tunnel_host, resolve_binary_path, restart_service,
-    service_endpoint_id, service_log, uninstall_service,
+    list_tunnel_hosts, publish_telemetry_choice_for_service, remove_tunnel_host,
+    resolve_binary_path, restart_service, service_endpoint_id, service_log, uninstall_service,
 };
-use tokio::{fs, signal};
+use tokio::{
+    fs,
+    io::{self as async_io, AsyncBufRead, AsyncBufReadExt, BufReader},
+    signal,
+};
 
 const RELAY_URL_HELP: &str = "use this relay server, replacing the defaults (repeatable)";
+
+/// What we tell people before asking them about telemetry, kept to what the
+/// iroh-services client actually reports: counters from the iroh endpoint.
+const TELEMETRY_PITCH: &str = "\
+pigeons can send anonymous metrics to help us develop iroh, the peer-to-peer
+network it flies over. They are connection counters: relay usage,
+hole-punching success, bytes moved. No hostnames, no usernames, no SSH
+traffic, and nothing about the machines you connect to.";
 
 /// Derive a route name from an endpoint ID for when `--name` is omitted.
 ///
@@ -120,6 +136,139 @@ pub struct RemoveArgs {
     pub name: String,
 }
 
+/// Whether this invocation is one we can interrupt with the telemetry question.
+///
+/// The question is only worth asking of a person sitting at a terminal who is
+/// setting pigeons up, and it is actively harmful to ask it anywhere else.
+fn should_ask_about_telemetry(cmd: &Cmd) -> bool {
+    let setup_command = match cmd {
+        // `fly --stdio` is ssh's ProxyCommand: stdin and stdout carry the
+        // tunnel, so a prompt on either would corrupt the session.
+        Cmd::Fly(args) => !args.stdio,
+        Cmd::Roost(_) | Cmd::Add(_) => true,
+        Cmd::Service {
+            op: ServiceCmd::Install { .. },
+        } => true,
+        _ => false,
+    };
+
+    // Elevated runs would write the answer into root's config rather than the
+    // config of the person answering. `service install` re-runs itself elevated,
+    // and by then the unelevated half has already asked.
+    setup_command
+        && !self_runas::is_elevated()
+        && io::stdin().is_terminal()
+        && io::stderr().is_terminal()
+}
+
+/// Reads a yes or no answer from `input`, re-asking until it gets one.
+///
+/// An empty line takes `default`. Returns `None` at end of input: a closed
+/// stdin never answered the question, which is not the same as answering no.
+async fn read_yes_no<R: AsyncBufRead + Unpin>(
+    input: &mut R,
+    default: bool,
+) -> io::Result<Option<bool>> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if input.read_line(&mut line).await? == 0 {
+            return Ok(None);
+        }
+        match line.trim().to_ascii_lowercase().as_str() {
+            "" => return Ok(Some(default)),
+            "y" | "yes" => return Ok(Some(true)),
+            "n" | "no" => return Ok(Some(false)),
+            _ => eprint!("please answer 'y' or 'n': "),
+        }
+    }
+}
+
+/// Asks about telemetry the first time someone sets pigeons up, and records
+/// the answer so we never ask again.
+///
+/// Both answers are written to the config file, which is what makes this a
+/// one-time question: an unset key means unasked, not declined. Every failure
+/// here is swallowed, because failing to record a preference must not stop the
+/// command the user actually ran.
+async fn ask_about_telemetry_once(cmd: &Cmd) {
+    if !should_ask_about_telemetry(cmd) {
+        return;
+    }
+    let Ok(config_path) = Config::config_path() else {
+        return;
+    };
+    // Deliberately not `load_or_default`: a config we could not parse is one we
+    // must not overwrite with an answer about its own contents. The user layer
+    // is read on its own so a machine-wide answer cannot silently stand in for
+    // this user's.
+    let Ok(mut config) = Config::load_user().await else {
+        return;
+    };
+    if config.telemetry_configured() {
+        return;
+    }
+
+    eprintln!("\n{TELEMETRY_PITCH}\n");
+    // Opting in takes a deliberate "y": someone who hits enter to get past the
+    // question has not agreed to anything.
+    eprint!("Send anonymous metrics? [y/N] ");
+    let enabled = match read_yes_no(&mut BufReader::new(async_io::stdin()), false).await {
+        Ok(Some(enabled)) => enabled,
+        // Leave the config alone so the next interactive run asks again.
+        Ok(None) => {
+            eprintln!();
+            return;
+        }
+        Err(err) => {
+            tracing::warn!("failed reading telemetry answer: {err:#}");
+            return;
+        }
+    };
+
+    config.set_telemetry_enabled(enabled);
+    if let Err(err) = config.store().await {
+        eprintln!("could not save your answer: {err:#}\n");
+        return;
+    }
+    let path = config_path.display();
+    if enabled {
+        eprintln!("\nThanks! Set telemetry_enabled = false in {path} to turn metrics off.\n");
+    } else {
+        eprintln!("\nNo metrics will be sent. Set telemetry_enabled = true in {path} to opt in.\n");
+    }
+}
+
+/// Carries the installing user's telemetry choice over to the service and says
+/// what the service will do.
+///
+/// The service reads root's config rather than the config of whoever installed
+/// it, so the choice has to be copied into the machine-wide file. A failure
+/// here leaves the service opted out, which is worth a line of output but not
+/// worth failing an otherwise successful install over.
+async fn report_service_telemetry() {
+    let enabled = match publish_telemetry_choice_for_service().await {
+        Ok(enabled) => enabled,
+        Err(err) => {
+            println!("Could not record a telemetry setting for the service: {err:#}");
+            false
+        }
+    };
+
+    let path = Config::system_config_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "the machine-wide config".to_string());
+    if enabled {
+        println!(
+            "Anonymous metrics: on for the service. Set telemetry_enabled = false in {path} to turn them off."
+        );
+    } else {
+        println!(
+            "Anonymous metrics: off for the service. Set telemetry_enabled = true in {path} to opt in."
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -128,6 +277,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    ask_about_telemetry_once(&cli.cmd).await;
 
     match cli.cmd {
         Cmd::Roost(args) => {
@@ -259,6 +409,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Paths => {
             println!("config: {:?}", Config::config_path()?);
+            if let Ok(system_config) = Config::system_config_path() {
+                println!("system config: {system_config:?}");
+            }
             let ssh_dir = home_ssh_dir()?;
             let pub_key = ssh_dir.join("pigeons_ed25519.pub");
             let priv_key = ssh_dir.join("pigeons_ed25519");
@@ -288,6 +441,7 @@ async fn main() -> anyhow::Result<()> {
                     })
                     .await?;
                     println!("Pigeons service installed.");
+                    report_service_telemetry().await;
                     Ok(())
                 }
                 ServiceCmd::Uninstall => {
@@ -351,6 +505,61 @@ mod tests {
     fn default_route_name_handles_short_ids() {
         assert_eq!(default_route_name("abc"), "pigeon-abc");
         assert_eq!(default_route_name(""), "pigeon-");
+    }
+
+    async fn answer(input: &str, default: bool) -> Option<bool> {
+        read_yes_no(&mut BufReader::new(input.as_bytes()), default)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn read_yes_no_accepts_both_spellings_in_any_case() {
+        assert_eq!(answer("y\n", false).await, Some(true));
+        assert_eq!(answer("YES\n", false).await, Some(true));
+        assert_eq!(answer("  n  \n", true).await, Some(false));
+        assert_eq!(answer("No\n", true).await, Some(false));
+    }
+
+    #[tokio::test]
+    async fn read_yes_no_takes_the_default_on_a_bare_newline() {
+        assert_eq!(answer("\n", true).await, Some(true));
+        assert_eq!(answer("\n", false).await, Some(false));
+    }
+
+    #[tokio::test]
+    async fn read_yes_no_reprompts_until_the_answer_parses() {
+        assert_eq!(answer("maybe\nsure\nn\n", true).await, Some(false));
+    }
+
+    /// A closed stdin never answered, so the caller has to leave the config
+    /// untouched and ask again next time rather than record a silent no.
+    #[tokio::test]
+    async fn read_yes_no_returns_none_at_end_of_input() {
+        assert_eq!(answer("", true).await, None);
+        assert_eq!(answer("maybe\n", true).await, None);
+    }
+
+    #[test]
+    fn telemetry_question_skips_ssh_proxy_command() {
+        let stdio = Cmd::Fly(FlyArgs {
+            public_key: "abc".to_string(),
+            stdio: true,
+            relay_url: vec![],
+        });
+        assert!(!should_ask_about_telemetry(&stdio));
+    }
+
+    /// Reporting commands are not a setup step, so they stay quiet even on a
+    /// terminal.
+    #[test]
+    fn telemetry_question_skips_read_only_commands() {
+        assert!(!should_ask_about_telemetry(&Cmd::List));
+        assert!(!should_ask_about_telemetry(&Cmd::Version));
+        assert!(!should_ask_about_telemetry(&Cmd::Paths));
+        assert!(!should_ask_about_telemetry(&Cmd::Service {
+            op: ServiceCmd::Status
+        }));
     }
 
     /// Regression: the ID is not validated until after the name is derived, so
