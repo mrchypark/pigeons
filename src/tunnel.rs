@@ -270,7 +270,7 @@ where
 }
 
 fn iroh_services_api_secret(config: &Config) -> Result<Option<ApiSecret>> {
-    if !config.telemetry_enabled() {
+    if !config.telemetry_enabled.unwrap_or(false) {
         return Ok(None);
     }
 

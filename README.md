@@ -112,6 +112,43 @@ The tunnel is also usable as a library. Add it with `cargo add iroh-pigeons`;
 the API is documented on [docs.rs][Rust Docs]. Note that the crate is published
 as `iroh-pigeons` while the CLI it installs is called `pigeons`.
 
+## Telemetry
+
+The first time you run a setup command (`roost`, `fly`, `add`, or `service
+install`) in a terminal, pigeons asks once whether it may send anonymous
+metrics to help us develop [iroh]. Both answers are recorded in the config file
+that `pigeons paths` prints, so the question is asked once:
+
+```toml
+telemetry_enabled = true
+```
+
+Change that key whenever you like, or delete the file to be asked again.
+Nothing is sent unless it is `true`.
+
+What gets sent are iroh endpoint counters, sampled once a minute and pushed to
+[iroh-services]: relay usage, hole-punching success, bytes moved. No hostnames,
+usernames, SSH traffic, or anything about the machines you connect to. The
+report travels over an iroh connection, so the sending endpoint ID is visible
+to the collector.
+
+The setting has two layers. Your own config wins, and any key it leaves unset
+falls back to a machine-wide config at `/etc/pigeons/config.toml`, or
+`C:\ProgramData\pigeons\config.toml` on Windows. Both paths are printed by
+`pigeons paths`.
+
+That machine-wide layer is what the service reads: a roost installed with
+`pigeons service install` runs as root, so it would otherwise never see the
+answer you gave as yourself. The install copies your answer there and prints
+what the service will do with it. To change the service's setting later, edit
+the machine-wide config and run `pigeons service restart`.
+
+pigeons never asks when it is not attached to a terminal, when it runs as
+`fly --stdio` (ssh's `ProxyCommand`), or when it runs elevated. Installing from
+a root shell instead of through `sudo` leaves nothing to trace an answer back
+to, so the service stays opted out until you set `telemetry_enabled` in the
+machine-wide config yourself.
+
 ## Commands
 
 ```bash
@@ -194,6 +231,7 @@ shall be dual licensed as above, without any additional terms or conditions.
 [QUIC]: https://en.wikipedia.org/wiki/QUIC
 [hole-punching]: https://en.wikipedia.org/wiki/Hole_punching_(networking)
 [iroh]: https://github.com/n0-computer/iroh
+[iroh-services]: https://services.iroh.computer
 [`ProxyCommand`]: https://man.openbsd.org/ssh_config#ProxyCommand
 [Releases]: https://github.com/n0-computer/pigeons/releases
 [Rust Docs]: https://docs.rs/iroh-pigeons
