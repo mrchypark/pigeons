@@ -22,7 +22,7 @@ const RELAY_URL_HELP: &str = "use this relay server, replacing the defaults (rep
 /// Kept to what the iroh-services client actually reports: endpoint counters.
 const TELEMETRY_PITCH: &str = "\
 pigeons can send anonymous metrics to help us develop iroh, the peer-to-peer
-network it flies over. They are connection counters: relay usage,
+network it flies over. They are counts of: relay usage,
 hole-punching success, bytes moved. No hostnames, no usernames, no SSH
 traffic, and nothing about the machines you connect to.";
 
