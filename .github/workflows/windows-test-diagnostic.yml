@@ -1,0 +1,32 @@
+name: Windows test diagnostic
+
+on:
+  push:
+    branches: [feature/windows-test-diagnostic]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - config::tests::config_path_for_user_lands_in_that_users_home
+          - protocol::tests::clean_remote_close_is_observed_as_stream_eof
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install release toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal --no-self-update
+      - name: Compile unchanged test suite
+        run: cargo +1.95.0 test --locked --lib --no-run
+      - name: Run one test with stage output
+        timeout-minutes: 3
+        env:
+          DIAGNOSTIC_TEST: ${{ matrix.test }}
+        run: cargo +1.95.0 test --locked --lib "$env:DIAGNOSTIC_TEST" -- --exact --nocapture --test-threads=1

@@ -142,16 +142,21 @@ mod tests {
         });
 
         let relay: RelayUrl = "http://127.0.0.1:9".parse().unwrap();
+        eprintln!("diagnostic: server builder");
         let mut server_builder = Tunnel::builder_ephemeral().await.unwrap();
         server_builder.roost = Some(RoostConfig { ssh_port });
         server_builder.relay_urls = vec![relay.clone()];
+        eprintln!("diagnostic: server build");
         let server = server_builder.build().await.unwrap();
         let server_addr = server.endpoint().addr();
         assert!(server_addr.ip_addrs().next().is_some());
 
+        eprintln!("diagnostic: client builder");
         let mut client_builder = Tunnel::builder_ephemeral().await.unwrap();
         client_builder.relay_urls = vec![relay];
+        eprintln!("diagnostic: client build");
         let client = client_builder.build().await.unwrap();
+        eprintln!("diagnostic: connect");
         let connection = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             client
@@ -161,13 +166,17 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
+        eprintln!("diagnostic: open stream");
         let (mut send, mut receive) = connection.open_bi().await.unwrap();
+        eprintln!("diagnostic: send preface and payload");
         send.write_all(&PigeonsProtocol::STREAM_PREFACE)
             .await
             .unwrap();
         send.write_all(b"half-close-payload").await.unwrap();
+        eprintln!("diagnostic: send half-close");
         send.shutdown().await.unwrap();
 
+        eprintln!("diagnostic: receive response");
         let response =
             tokio::time::timeout(std::time::Duration::from_secs(10), receive.read_to_end(128))
                 .await
@@ -175,8 +184,12 @@ mod tests {
                 .expect("clean peer close must be stream EOF");
         assert_eq!(response, b"SSH-2.0-pigeons-test\r\nDRAINED");
 
+        eprintln!("diagnostic: service join");
         service.await.unwrap();
+        eprintln!("diagnostic: client close");
         client.close().await.unwrap();
+        eprintln!("diagnostic: server close");
         server.close().await.unwrap();
+        eprintln!("diagnostic: finished");
     }
 }

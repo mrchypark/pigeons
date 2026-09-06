@@ -251,10 +251,13 @@ mod tests {
 
     #[test]
     fn config_path_for_user_lands_in_that_users_home() {
+        eprintln!("diagnostic: current username");
         let me = whoami::username().expect("running as some user");
 
+        eprintln!("diagnostic: named-user home lookup");
         let path = config_path_for_user(&me).expect("current user has a home directory");
 
+        eprintln!("diagnostic: current-user home lookup");
         let home = homedir::my_home().unwrap().unwrap();
         assert!(path.starts_with(&home), "{path:?} is not under {home:?}");
         assert!(path.ends_with("pigeons/config.toml"), "{path:?}");
