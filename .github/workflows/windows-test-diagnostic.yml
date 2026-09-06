@@ -30,3 +30,6 @@ jobs:
         env:
           DIAGNOSTIC_TEST: ${{ matrix.test }}
         run: cargo +1.95.0 test --locked --lib "$env:DIAGNOSTIC_TEST" -- --exact --nocapture --test-threads=1
+      - name: Run complete suite with default concurrency
+        timeout-minutes: 3
+        run: cargo +1.95.0 test --locked -- --nocapture
