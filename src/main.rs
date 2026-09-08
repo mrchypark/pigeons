@@ -3,6 +3,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     str::FromStr,
+    time::Duration,
 };
 
 use clap::{ArgAction, Args, Parser, Subcommand};
@@ -269,8 +270,19 @@ async fn report_service_telemetry() {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // tokio::io::stdin uses a blocking reader.  A remote close cancels its
+    // future, but cannot interrupt that OS read, so bound runtime shutdown to
+    // let a stdio ProxyCommand actually terminate.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run());
+    runtime.shutdown_timeout(Duration::from_millis(250));
+    result
+}
+
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(io::stderr)

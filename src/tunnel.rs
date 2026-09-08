@@ -163,7 +163,7 @@ impl Tunnel {
         let mut stdin = io::stdin();
         let mut stdout = io::stdout();
 
-        copy_both(&mut stdin, &mut stdout, &mut iroh_recv, &mut iroh_send).await?;
+        copy_stdio(&mut stdin, &mut stdout, &mut iroh_recv, &mut iroh_send).await?;
 
         Ok(())
     }
@@ -265,6 +265,43 @@ where
     )
 }
 
+/// Copy a ProxyCommand's stdio without waiting for stdin after the remote
+/// stream closes.  Unlike a TCP bridge, SSH keeps ProxyCommand stdin open
+/// until this process exits, so that close is terminal on this side.
+async fn copy_stdio<AR, AW, BR, BW>(
+    a_reader: &mut AR,
+    a_writer: &mut AW,
+    b_reader: &mut BR,
+    b_writer: &mut BW,
+) -> io::Result<(u64, u64)>
+where
+    AR: AsyncRead + Unpin,
+    AW: AsyncWrite + Unpin,
+    BR: AsyncRead + Unpin,
+    BW: AsyncWrite + Unpin,
+{
+    let local_to_remote = copy_flush_and_shutdown(a_reader, b_writer);
+    let remote_to_local = copy_flush_and_shutdown(b_reader, a_writer);
+    tokio::pin!(local_to_remote);
+    tokio::pin!(remote_to_local);
+
+    tokio::select! {
+        local_to_remote = &mut local_to_remote => {
+            // Local EOF is an SSH half-close.  Continue the same remote copy:
+            // recreating it could discard bytes already buffered by the read.
+            let local_to_remote = local_to_remote?;
+            let remote_to_local = remote_to_local.await?;
+            Ok((local_to_remote, remote_to_local))
+        }
+        remote_to_local = &mut remote_to_local => {
+            // Do not wait for ProxyCommand stdin after a remote close.  The
+            // caller then releases the stream and exits the command.
+            let remote_to_local = remote_to_local?;
+            Ok((0, remote_to_local))
+        }
+    }
+}
+
 async fn copy_flush_and_shutdown<R, W>(reader: &mut R, writer: &mut W) -> io::Result<u64>
 where
     R: AsyncRead + Unpin,
@@ -323,4 +360,42 @@ fn iroh_services_api_secret(config: &Config) -> Result<Option<ApiSecret>> {
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stdio_local_eof_drains_delayed_remote_output() {
+        let (mut local_input, mut bridge_input) = io::duplex(64);
+        let (mut bridge_output, mut local_output) = io::duplex(64);
+        let (mut bridge_send, mut remote_input) = io::duplex(64);
+        let (mut remote_output, mut bridge_receive) = io::duplex(64);
+
+        let bridge = tokio::spawn(async move {
+            copy_stdio(
+                &mut bridge_input,
+                &mut bridge_output,
+                &mut bridge_receive,
+                &mut bridge_send,
+            )
+            .await
+        });
+
+        local_input.write_all(b"request").await.unwrap();
+        local_input.shutdown().await.unwrap();
+
+        let mut request = Vec::new();
+        remote_input.read_to_end(&mut request).await.unwrap();
+        assert_eq!(request, b"request");
+
+        remote_output.write_all(b"delayed output").await.unwrap();
+        remote_output.shutdown().await.unwrap();
+
+        assert_eq!(bridge.await.unwrap().unwrap(), (7, 14));
+        let mut output = Vec::new();
+        local_output.read_to_end(&mut output).await.unwrap();
+        assert_eq!(output, b"delayed output");
+    }
 }
